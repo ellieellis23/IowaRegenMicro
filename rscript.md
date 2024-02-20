@@ -1,0 +1,174 @@
+This section includes how to create a distance matrix from either a raw or rarefied table, performing statistics (PERMANOVA) to understand if communities within treatments are significantly different, and visualizing this using an NMDS. Additionally, this shows how to make a rarefied distance matrix. Finally, it shows how to determine if variance in different communities is homogenous using BETADISPERSION
+
+
+```{r}
+library(tidyverse)
+library(vegan)
+set.seed(12345) 
+```
+
+
+PERMANOVA and NMDS of rarefied table. 
+
+```{r}
+data <- read_csv("october_data/asv_rarefied_table_gtdb214_15000.csv")
+metadata <- read_csv("october_data/metadata_r.csv")
+```
+
+
+We need to invert the dataframe so that each row is a sample and each column is an ASV. This is also an opprotunity to filter out any samples/treatments we are not interested in.
+```{r}
+flip <- data %>% 
+ # select(1, !contains("_P1_"))  %>% # if you want to filter out certain samples could be done here
+  pivot_longer(2:57, names_to = "Sample", values_to = "count") %>% 
+  pivot_wider(names_from = ASV, values_from = count)
+```
+
+Make sure that the dataframe and metadata have the same number of rows and that the rows are in the exact same order.
+```{r}
+meta <- flip %>% 
+  select(1) %>% 
+  inner_join(metadata)
+```
+
+Here we filter the dataframe to remove the first column composed of sample names.
+```{r}
+table <- flip %>% 
+  select(2:18550)
+```
+
+
+The next step is to take the data frame and turn it into a distance matrix. Here we are calculating distance using Bray-Curtis distance, but many other methods are available. Distance matrices are pairwise comparisons that compare the similarity of every community on a scale from 0 to 1. 0 indicates communities are exactly the same and 1 indicates there is no similarity in the communities.
+```{r}
+data.t <- as.matrix(vegdist(table, method = 'bray'))
+```
+
+PERMANOVA (Permutational multivariate analysis of variance) is a non-parametric multivariate statistical test that is useful when studying microbial communities because it allows you to compare how similar different communities are. PERMANOVA is useful because it has very few assumptions that the data need to meet (allows for differences in variation between groups, insensitive to multicollinearity, datasets can be zero-inflated).
+
+Interpreting the output:
+F-ratio: Compares the total sum of squared dissimilarities of objects from different groups to objects in the same group, also called the effect size. Larger F-ratios mean greater separation between groups
+R2: Is a statistic that shows the percentage of variance explained by each variable             
+P: If p<0.05 differences between groups are unlikely to have occurred by chance
+```{r}
+
+mer_perm<-adonis2(data.t ~ Site*Depth, data=meta, permutations = 999)
+mer_perm
+```
+
+We can do pairwise comparisons to understand which sites are different from each other
+```{r}
+library(pairwiseAdonis)
+pairwise.adonis<-pairwise.adonis2(data.t ~ Site, data=meta, permutations = 999)
+pairwise.adonis
+```
+
+Now we can visualize community similarity using NMDS (non-metric multidimensional scaling), an iterative and non-parametirc method that aims to plot pairwise dissimilarity between communities. Each point will represent one sample (or microbial community). The closer points are together the more similar those communities are to each other.
+
+How good an NMDS visualization is at representing your community can be assessed by the stress values. Typically NMDS with stress below 0.2 can be retained.
+
+Stress value below 0.05 is considered a great fit
+
+Stress value below 0.1 is considered a good fit 
+
+Stress value below 0.2 is considered an ok fit 
+
+A stress value above 0.2 is questionable and anything approaching 0.3 is considered arbitrary
+
+Important parameters in the metaMDS function:
+"trymax"" is the maximum number of random starts it will perform to try to reach convergence. The default value is 20 and if it reaches convergence after 20 random starts it will end there. Otherwise, it will go either until it reaches convergence or the number of tries you have put in.
+
+"k" is the number of dimensions. If you are having trouble converging then you can try increasing the k value. If you don't set k it will run with 2 dimensions. Increasing hte k value will likely increase the stress. Anything above 5 dimensions makes interpreting 2-dimensional plots difficult.
+```{r}
+NMDS<-metaMDS(data.t, trymax= 200)
+MDS1 = NMDS$points[,1]
+MDS2 = NMDS$points[,2]
+NMDS = data.frame(NMDS1 = MDS1, NMDS2 = MDS2)
+```
+
+```{r}
+NMDS_plot <- ggplot(NMDS) +
+  geom_point(aes(x=NMDS1, y=NMDS2, col=meta$Site,  shape=meta$Depth), size=4) + 
+  theme_bw() +
+  labs(color = "Site", shape= "Depth")+
+   #scale_shape_manual(values = c(2, 15, 3)) +  #change shape of points
+  #stat_ellipse(aes(x=NMDS1, y=NMDS2, col=meta_raw$Site)) + #add ellipse around variables
+  #scale_color_manual(values=c('#1b9e77','#d95f02','#7570b3', '#e7298a', '#66a61e', '#e6ab02'))+ #change color of points
+   theme(text=element_text(size=21))
+ NMDS_plot
+```
+
+
+PERMANOVA and NMDS of rarefaction table. 
+```{r}
+raw <- read_csv("october_data/asv_table_16S_gtdb_raw.csv")
+metadata <- read_csv("october_data/metadata_r.csv")
+```
+
+
+Here we need to invert the table as we did above but also need to sample out all samples that are below 15000 reads. Samples above 15000 will retain all reads in this step.
+```{r}
+flip_raw <- raw %>% 
+  pivot_longer(2:60, names_to = "Sample", values_to = "count") %>% 
+  group_by(Sample) %>%
+  mutate(total = sum(count)) %>%
+  filter(total > 15000) %>% 
+  select(-total) %>% 
+  pivot_wider(names_from = ASV, values_from = count) %>% 
+  ungroup() 
+```
+
+Match metadata and sample table
+```{r}
+meta_raw <- flip_raw %>% 
+  select(1) %>% 
+  inner_join(metadata)
+```
+
+```{r}
+flip_raw2 <- flip_raw %>% 
+  select(2:19500)
+```
+
+Here we will rarefy to 15,000 reads, avedist is similar to vegdist except it will subsample 100 times and take the average of every subsample. This helps to incorporate all the data such as rare taxa that may otherwise be lost with a single subsample.
+```{r}
+data.raw <- as.matrix(avgdist(flip_raw2, dmethod="bray", sample=15000))
+```
+
+```{r}
+
+perm_rare<-adonis2(data.raw ~ Site*Depth, data=meta_raw, permutations = 999)
+perm_rare
+```
+
+
+```{r}
+NMDS<-metaMDS(data.raw, trymax= 200)
+MDS1 = NMDS$points[,1]
+MDS2 = NMDS$points[,2]
+NMDS = data.frame(NMDS1 = MDS1, NMDS2 = MDS2)
+```
+
+```{r}
+NMDS_raw <- ggplot(NMDS) +
+  geom_point(aes(x=NMDS1, y=NMDS2, col=meta_raw$Site,  shape=meta_raw$Depth), size=4) + 
+  theme_bw() +
+  labs(color = "Site", shape= "Depth")+
+  #scale_shape_manual(values = c(2, 15, 3)) +  #change shape of points
+  #stat_ellipse(aes(x=NMDS1, y=NMDS2, col=meta_raw$Site)) + #add ellipse around variables
+  #scale_color_manual(values=c('#1b9e77','#d95f02','#7570b3', '#e7298a', '#66a61e', '#e6ab02'))+ #change color of points
+   theme(text=element_text(size=21))
+ NMDS_raw
+```
+
+BETADISPERSION
+Betadispersion tests for multivariate homogeneity between groups or variances between groups. This helps understand if there is greater variability in one group compared to another. Betadispersion paired with PERMANOVA helps to understand if the differences observed are a result of differences in community structure or differences between variance in the communities within each treatment.
+
+```{r}
+data.p <- vegdist(table , method = 'bray')
+b=betadisper(d=data.p, group=meta$Site) # calculate multivariate dispersion
+anova(b) #perfporm anova to determine if dispersion is different between site
+permutest(b, pairwise = TRUE, permutations = 999)
+(mod.HSD <- TukeyHSD(b))
+plot(mod.HSD) 
+boxplot(b)
+```
